@@ -197,6 +197,27 @@ table.plan{width:100%;border-collapse:collapse;font-size:14.5px}
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 16px;border-radius:999px;font-weight:600;z-index:20;box-shadow:var(--shadow)}
 .help{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:14px}
 .help kbd{font-family:var(--font-mono);font-size:12px;border:1px solid var(--line);border-radius:5px;padding:1px 6px;background:var(--sunk);white-space:nowrap;justify-self:start}
+
+.vimg.portrait,.vimgwrap.portrait{max-width:780px}
+.vimgwrap{width:100%;aspect-ratio:16/9;border:1px solid var(--line);border-radius:8px;background:var(--sunk);display:grid;place-items:center;overflow:hidden}
+.vimgwrap.portrait{aspect-ratio:1/1.414}
+.vimgwrap .vimg{border:0;border-radius:0}
+.skel{display:flex;gap:10px;align-items:center;color:var(--muted)}
+.matches{border:1px solid var(--line);border-left:3px solid var(--mark);background:var(--surface);border-radius:8px;padding:8px 12px;margin-bottom:10px;display:grid;gap:4px}
+.matches .mh{font-family:var(--font-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.mline{font-size:14px;line-height:1.45}
+details.ptext-d{margin-top:12px}
+details.ptext-d summary{cursor:pointer;font-weight:600;color:var(--muted);font-size:14px}
+.ptext{font-size:15px;line-height:1.55;max-width:72ch;margin-top:8px}
+.ptext.solo{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:16px 20px}
+.ptext p{margin:0 0 10px}
+.ptext .pt-h{font-size:19px;font-weight:800;margin:0 0 10px;letter-spacing:-.01em}
+.ptext .pt-h2{font-size:12px;font-family:var(--font-mono);letter-spacing:.07em;text-transform:uppercase;color:var(--accent);margin:16px 0 6px;font-weight:600}
+.ptext ul{margin:0 0 10px;padding-left:20px}
+.ptext li{margin:3px 0}
+.ptext li::marker{color:var(--accent)}
+.pt-run{display:flex;flex-direction:column;gap:2px;margin:0 0 10px;padding-left:10px;border-left:2px solid var(--line)}
+.pt-links{display:flex;flex-direction:column;gap:2px;margin-top:10px;font-size:12px;color:var(--muted);overflow-wrap:anywhere;font-family:var(--font-mono)}
 [hidden]{display:none!important}
 </style>
 
@@ -514,14 +535,69 @@ function renderViewer(ref) {
   }
   const total = doc.pages.length, p = Math.min(Math.max(1, n.page), total), key = doc.id + " p" + p;
   S.detail = { type: "page", ref: key }; S.sel = "page:" + key;
-  const img = IMGS[key];
+  const img = IMGS[key], packed = (DATA.packs || []).includes(doc.id), portrait = /^P\d/.test(doc.id);
+  const raw = doc.pages[p - 1] || "", hasVisual = !!(img || packed || doc.pdf);
+  const matches = S.q ? pageMatches(raw, S.q) : "";
   V.innerHTML = `<div class="dhead"><h2>${esc(doc.kind === "upload" ? doc.title : key)}</h2><span class="tag">${esc(doc.kind === "upload" ? "page " + p : doc.title)}</span></div>
     <div class="vnav"><button class="btn" data-page="${esc(doc.id)}|${p - 1}" ${p <= 1 ? "disabled" : ""}>← Prev <span class="mono">[</span></button><span class="mono note">${p} / ${total}</span><button class="btn" data-page="${esc(doc.id)}|${p + 1}" ${p >= total ? "disabled" : ""}>Next <span class="mono">]</span> →</button>
     ${linkedConcepts(key)}</div>
-    ${img ? `<img class="vimg" src="${esc(img)}" alt="${esc(key)}">` : doc.pdf ? `<canvas id="pdfc"></canvas>` : ""}
-    <div class="vtext">${S.q ? snippetAll(doc.pages[p - 1], S.q) : esc(doc.pages[p - 1] || "(no text on this page)")}</div>
-    ${!img && !doc.pdf && doc.kind === "slide" ? `<p class="note">Text only for this slide. Diagram-heavy slides are shown as images.</p>` : ""}`;
+    ${matches ? `<div class="matches"><div class="mh">Matches for “${esc(S.q)}”</div>${matches}</div>` : ""}
+    ${img ? `<img class="vimg${portrait ? " portrait" : ""}" src="${esc(img)}" alt="${esc(key)}">`
+      : packed ? `<div class="vimgwrap${portrait ? " portrait" : ""}" id="vimg"><div class="skel"><span class="dot"></span>Loading ${portrait ? "page" : "slide"}…</div></div>`
+      : doc.pdf ? `<canvas id="pdfc"></canvas>` : ""}
+    ${hasVisual ? `<details class="ptext-d"><summary>Page text</summary><div class="ptext">${formatPage(raw, true)}</div></details>`
+      : `<div class="ptext solo">${formatPage(raw, false)}</div>`}`;
   if (doc.pdf) renderPdfPage(doc, p, $("#pdfc"), 1.6);
+  if (packed && !img) pageImg(doc.id, p).then(src => {
+    const w = $("#vimg"); if (!w || S.detail?.ref !== key) return;
+    w.innerHTML = src ? `<img class="vimg${portrait ? " portrait" : ""}" src="${src}" alt="${esc(key)}">` : `<p class="note">Couldn't load the page image. The text is below.</p>`;
+    if (!src) { const d = $(".ptext-d"); if (d) d.open = true; }
+  });
+}
+/* page images: one JSON pack per document, fetched on first view and cached */
+const PACKS = {};
+function pageImg(doc, p) {
+  PACKS[doc] ||= fetch("pages/" + encodeURIComponent(doc) + ".json").then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+  return PACKS[doc].then(j => j.pages[p - 1] || null).catch(() => { delete PACKS[doc]; return null; });
+}
+/* turn extracted PDF text into skimmable blocks */
+const BOILER = /^(COMPX324(-B)?(-26B)?\b.*|User Experience Design|\d{1,3}|David Nichols|Colin Pilbrow|G\.\d\.\d+|daven@waikato\.ac\.nz|Mark Apperley|\d{1,2}\/\d{1,2}\/\d{2})$/i;
+const BULLET = /^([\u2022\u25AA\u25A0\u25A1\u25CB\u25CF\u25E6\u2023\u27A2\u27A4\u25BA\u2713\u2714\u2013\u2014*\-]|[\uE000-\uF8FF]|\d{1,2}[.)])\s*/;
+function formatPage(raw, hasVisual) {
+  let [main, ocr] = String(raw || "").split("\n[text read from slide image]\n");
+  if (ocr && main.split(/\s+/).filter(Boolean).length < 12) main = (main ? main + "\n" : "") + ocr;
+  const lines = main.split("\n").map(l => l.trim()).filter(l => l && !BOILER.test(l));
+  const links = [], blocks = [];
+  let para = null, list = null, run = null;
+  const flush = () => { if (para) blocks.push({ t: "p", s: para }); if (list) blocks.push({ t: "ul", s: list }); if (run) blocks.push(run.length >= 3 ? { t: "run", s: run } : null, ...(run.length < 3 ? run.map(x => ({ t: "p", s: x })) : [])); para = list = run = null; };
+  lines.forEach((l, i) => {
+    if (/^https?:\/\/\S+$|^www\.\S+$/.test(l)) { links.push(l); return; }
+    const next = lines[i + 1] || "", prev = lines[i - 1] || "";
+    const m = BULLET.exec(l);
+    if (m && l.length > m[0].length) { if (para || run) { const L = list; list = null; flush(); list = L; } (list ||= []).push(l.slice(m[0].length)); return; }
+    if (list && prev.length >= 55 && /^[a-z(]/.test(l)) { list[list.length - 1] += " " + l; return; }
+    const short = l.length <= 60 && !/[.,;]$/.test(l);
+    const isHead = short && /^[A-Z0-9“"'(]/.test(l) && l.split(/\s+/).length <= 8 && (i === 0 || /^[A-Z0-9 &'’()\/:-]{3,}$/.test(l) || next.length >= 55 || BULLET.test(next));
+    if (isHead && !(run && next.length > 0 && next.length <= 60 && !BULLET.test(next) && next.length < 55)) { flush(); blocks.push({ t: i === 0 ? "h" : "h2", s: l }); return; }
+    if (short && l.length < 55) { if (para || list) flush(); (run ||= []).push(l); return; }
+    if (run) flush();
+    if (list) flush();
+    if (para && prev.length >= 55) para += " " + l; else { if (para) flush(); para = l; }
+  });
+  flush();
+  const hl = x => linkRefs(esc(x));
+  let html = blocks.filter(Boolean).map(b => b.t === "h" ? `<h4 class="pt-h">${hl(b.s)}</h4>` : b.t === "h2" ? `<h5 class="pt-h2">${hl(b.s)}</h5>`
+    : b.t === "ul" ? `<ul>${b.s.map(x => `<li>${hl(x)}</li>`).join("")}</ul>` : b.t === "run" ? `<div class="pt-run">${b.s.map(x => `<span>${hl(x)}</span>`).join("")}</div>` : `<p>${hl(b.s)}</p>`).join("");
+  if (links.length) html += `<div class="pt-links">${links.map(u => `<span>${esc(u)}</span>`).join("")}</div>`;
+  if (S.q) { const re = hlRe(S.q); if (re) html = html.replace(/>([^<]+)</g, (m, t) => ">" + t.replace(new RegExp(re.source, "gi"), "<mark>$&</mark>") + "<"); }
+  return html || `<p class="note">${hasVisual ? "No text on this page." : "(no text on this page)"}</p>`;
+}
+function pageMatches(raw, q) {
+  const re = hlRe(q); if (!re) return "";
+  const text = String(raw).replace("\n[text read from slide image]\n", "\n").replace(/\s*\n\s*/g, " ").replace(/\s+/g, " ");
+  const sents = text.split(/(?<=[.!?”])\s+(?=[A-Z“"])|\s(?=[•▪■○●])/);
+  const hits = sents.filter(x => new RegExp(re.source, "i").test(x)).slice(0, 5);
+  return hits.map(h => `<div class="mline">${esc(h.length > 260 ? h.slice(0, 260) + "…" : h).replace(new RegExp(re.source, "gi"), "<mark>$&</mark>")}</div>`).join("");
 }
 function snippetAll(t, q) { const re = hlRe(q); const s = esc(t || ""); return re ? s.replace(new RegExp(re.source, "gi"), "<mark>$&</mark>") : s; }
 function linkedConcepts(key) {
