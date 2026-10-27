@@ -67,6 +67,8 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
   .main:not(.has-detail) .right{display:none}
   .backbtn{display:inline-flex!important}
 }
+.navback{border:1px solid var(--accent);background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:5px 12px;cursor:pointer;font-weight:600;font-size:14px;white-space:nowrap;max-width:min(44vw,320px);overflow:hidden;text-overflow:ellipsis}
+.navback:hover{background:var(--accent);color:var(--accent-ink)}
 .backbtn{display:none;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 12px;cursor:pointer;margin-bottom:10px;font-weight:600}
 
 /* search */
@@ -224,6 +226,7 @@ details.ptext-d summary{cursor:pointer;font-weight:600;color:var(--muted);font-s
 </head><body><div class="app" id="app">
   <header class="top">
     <div class="brand"><b>324 Exam Companion</b><span id="modeTag"></span></div>
+    <button class="navback" id="navBack" hidden>← Back to <span></span></button>
     <nav class="tabs" role="tablist" id="tabs"></nav>
     <div class="spacer"></div>
     <div class="clock" id="clock" title="2-hour exam countdown. Press ▶ when the exam starts."><span class="q" id="clockQ">exam</span><span class="t" id="clockT">2:00:00</span>
@@ -376,11 +379,37 @@ const VIEWS = [["lookup", "Lookup", "1"], ["build", "Build answer", "2"]];
 if (MODE === "personal") VIEWS.push(["ask", "Ask Claude", "3"]);
 if (MODE === "public") VIEWS.push(["library", "My material", "3"]);
 const S = { view: "lookup", q: "", filter: "all", detail: null, sel: null };
-function setView(v) { S.view = v; try { history.replaceState(null, "", "#" + v); } catch {} render(); }
+function setView(v) { if (v !== S.view) pushNav(); S.view = v; try { history.replaceState(null, "", "#" + v); } catch {} render(); }
+/* back trail: every jump remembers where you were, including scroll */
+const NAV = [];
+function paneScroll() { return { main: ($("#view") || $("#right"))?.scrollTop || 0, left: $("#left")?.scrollTop || 0 }; }
+function snap() { return { view: S.view, detail: S.detail ? { ...S.detail } : null, sel: S.sel, q: S.q, filter: S.filter, scroll: paneScroll() }; }
+function sameSnap(a, b) { return a.view === b.view && JSON.stringify(a.detail) === JSON.stringify(b.detail) && a.q === b.q; }
+function pushNav() { const s = snap(); const top = NAV[NAV.length - 1]; if (!top || !sameSnap(top, s)) { NAV.push(s); if (NAV.length > 60) NAV.shift(); } }
+function navLabel(sn) {
+  if (!sn) return "";
+  if (sn.view !== "lookup") return VIEWS.find(v => v[0] === sn.view)?.[1] || sn.view;
+  if (!sn.detail) return sn.q ? `results for “${sn.q.length > 18 ? sn.q.slice(0, 18) + "…" : sn.q}”` : "Lookup";
+  if (sn.detail.type === "concept") return CBYID[sn.detail.id]?.name || "card";
+  if (sn.detail.type === "page") return sn.detail.ref;
+  return "incident";
+}
+function goBack() {
+  const sn = NAV.pop(); if (!sn) { if (S.detail) { S.detail = null; S.sel = null; render(); } return; }
+  Object.assign(S, { view: sn.view, detail: sn.detail, sel: sn.sel, q: sn.q, filter: sn.filter });
+  try { history.replaceState(null, "", "#" + sn.view); } catch {}
+  render();
+  requestAnimationFrame(() => { const m = $("#view") || $("#right"); if (m) m.scrollTop = sn.scroll.main; const l = $("#left"); if (l) l.scrollTop = sn.scroll.left; });
+}
+function renderBack() {
+  const b = $("#navBack"); if (!b) return; const top = NAV[NAV.length - 1];
+  b.hidden = !top; if (top) { b.querySelector("span").textContent = navLabel(top); b.title = "Back to " + navLabel(top) + " (Alt+← or Backspace)"; }
+  const mb = document.querySelector(".backbtn"); if (mb) mb.textContent = "← Back to " + (top ? navLabel(top) : "results");
+}
 function renderTabs() {
   $("#tabs").innerHTML = VIEWS.map(([id, name, k]) => `<button class="tab" role="tab" aria-selected="${S.view === id}" data-view="${id}">${name}<kbd>Alt+${k}</kbd></button>`).join("");
 }
-function openDetail(d) { S.detail = d; S.sel = d.type + ":" + (d.id || d.ref); if (S.view !== "lookup") S.view = "lookup"; render(); $(".right")?.scrollTo(0, 0); }
+function openDetail(d) { pushNav(); S.detail = d; S.sel = d.type + ":" + (d.id || d.ref); if (S.view !== "lookup") S.view = "lookup"; render(); $(".right")?.scrollTo(0, 0); }
 
 function render() {
   renderTabs();
@@ -391,6 +420,7 @@ function render() {
   if (S.view === "build") renderBuild();
   if (S.view === "ask") renderAsk();
   if (S.view === "library") renderLibrary();
+  renderBack();
 }
 
 /* ---------- lookup: left pane ---------- */
@@ -924,7 +954,7 @@ document.addEventListener("click", e => {
   if (ds.incident) return openDetail({ type: "incident", id: ds.incident });
   if (ds.filter) { S.filter = ds.filter; renderLeft(); $("#q").focus(); return; }
   if (ds.try) { S.q = ds.try; renderLeft(); return; }
-  if (t.hasAttribute("data-back")) { S.detail = null; S.sel = null; render(); return; }
+  if (t.hasAttribute("data-back") || t.id === "navBack") { goBack(); return; }
   if (ds.page) { const [id, p] = ds.page.split("|"); return renderViewer(id + " p" + p); }
   if (ds.ctx) { B.ctx = ds.ctx; B.ctxManual = true; store.set("build", B); return renderBuild(); }
   if (ds.add) { B.ids.push(ds.add); store.set("build", B); return renderBuild(); }
@@ -949,6 +979,7 @@ document.addEventListener("keydown", e => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
   if (e.altKey && /^[1-9]$/.test(e.key)) { const v = VIEWS[+e.key - 1]; if (v) { e.preventDefault(); setView(v[0]); } return; }
   if (e.key === "/" && !typing) { e.preventDefault(); if (S.view !== "lookup") { S.view = "lookup"; render(); } const q = $("#q"); q.focus(); q.select(); return; }
+  if ((e.altKey && e.key === "ArrowLeft") || (e.key === "Backspace" && !typing)) { e.preventDefault(); goBack(); return; }
   if (e.key === "Escape") {
     if (typing && document.activeElement.id === "q" && S.q) { S.q = ""; document.activeElement.value = ""; renderResults(); return; }
     if (S.detail && S.view === "lookup") { S.detail = null; S.sel = null; render(); $("#q")?.focus(); }
