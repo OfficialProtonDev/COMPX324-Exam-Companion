@@ -230,7 +230,7 @@ details.ptext-d summary{cursor:pointer;font-weight:600;color:var(--muted);font-s
 .ask-head{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
 .ask-head b{font-size:15px;font-weight:800;white-space:nowrap}
 @media (max-width:560px){.ask-head .note{display:none}}
-.ask-form{padding:12px 14px;border-bottom:1px solid var(--line);display:grid;gap:8px;background:var(--bg)}
+.ask-form{padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line);display:grid;gap:8px;background:var(--bg)}
 .ask-form .ta{min-height:70px;font-size:14.5px}
 .ask-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .ask-row select{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:5px 8px;font-size:13.5px;min-width:0;flex:1}
@@ -243,6 +243,13 @@ details.ptext-d summary{cursor:pointer;font-weight:600;color:var(--muted);font-s
   .askbar{position:fixed;right:0;top:0;bottom:0;z-index:15;width:min(100vw,460px);max-width:100vw;min-width:0;box-shadow:-8px 0 24px rgba(0,0,0,.18);padding-top:env(safe-area-inset-top,0px)}
   .ask-resize{display:none}
 }
+
+.bub{margin:0 0 12px}
+.bub.user{margin-left:28px;background:var(--accent-soft);border-radius:12px 12px 4px 12px;padding:8px 12px;white-space:pre-wrap;font-size:14.5px}
+.bub .bmeta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px}
+.bub.bot{border-bottom:1px dashed var(--line);padding-bottom:12px}
+.ask-empty p{margin:0 0 8px;font-size:14.5px;max-width:60ch}
+.ask-out{display:flex;flex-direction:column}
 [hidden]{display:none!important}
 </style>
 
@@ -782,37 +789,69 @@ function tick() {
 }
 
 /* ---------- Ask Claude (personal) ---------- */
-const ASK = { q: "", ctx: "P3", tier: "default", busy: false, ctl: null, out: "", sources: "", hist: store.get("askhist", []), open: store.get("askopen", false) };
-let sampleFn = null, sampleChecked = false;
+const TIERS = {
+  quick: { label: "Fast", opts: { modelTier: "quick" } },
+  balanced: { label: "Opus 5.5 · medium", opts: { model: "claude-opus-5-5", effort: "medium", modelTier: "default" } },
+  deep: { label: "Opus 5.5 · high (slow)", opts: { model: "claude-opus-5-5", effort: "high", modelTier: "complex" } }
+};
+const ASK = { q: "", ctx: "P3", tier: TIERS[store.get("asktier", "balanced")] ? store.get("asktier", "balanced") : "balanced", busy: false, ctl: null, turns: [], status: "",
+  chats: store.get("askchats", []), chatId: null, open: store.get("askopen", false), withOpen: store.get("askwithopen", true), sent: [], lastCtx: null };
+let sampleFn = null, sampleChecked = false, sampleLimits = null;
+
 function toggleAsk(force) {
   if (MODE !== "personal") return;
   ASK.open = force ?? !ASK.open; store.set("askopen", ASK.open);
   $("#askbar").hidden = !ASK.open; renderTabs();
   if (ASK.open) { renderAsk(); setTimeout(() => $("#aq")?.focus(), 0); }
 }
+function newChat() { if (ASK.busy) ASK.ctl?.abort(); Object.assign(ASK, { turns: [], chatId: null, sent: [], lastCtx: null, status: "" }); renderAsk(); $("#aq")?.focus(); }
+function saveChat() {
+  if (!ASK.turns.length) return;
+  if (!ASK.chatId) ASK.chatId = Date.now().toString(36);
+  const c = { id: ASK.chatId, t: Date.now(), title: ASK.turns[0].show.slice(0, 90), ctx: ASK.turns[0].ctx, turns: ASK.turns.map(({ role, content, show, ctx, imgs, note }) => ({ role, content, show, ctx, imgs, note })), sent: ASK.sent, lastCtx: ASK.lastCtx };
+  ASK.chats = [c, ...ASK.chats.filter(x => x.id !== c.id)].slice(0, 8);
+  store.set("askchats", ASK.chats);
+}
+function askStatus(msg) { ASK.status = msg; const s = $("#askStatus"); if (s) s.textContent = msg; }
+function bubbleHTML(t, i) {
+  if (t.role === "user") return `<div class="bub user"><div>${esc(t.show)}</div><div class="bmeta"><span class="tag">${esc(CONTEXTS.find(c => c[0] === t.ctx)?.[1] || "")}</span>${(t.imgs || []).length ? `<span class="tag">· images</span>` + t.imgs.map(refChip).join("") : ""}</div></div>`;
+  const pending = t.pending && !t.show;
+  return `<div class="bub bot" data-turn="${i}"><div class="answer">${pending ? "" : mdToHtml(t.show)}</div>
+    ${t.pending ? `<div class="thinking"><span class="dot"></span><span id="askStatus">${esc(ASK.status || "Thinking…")}</span></div>` : ""}
+    ${t.note ? `<div class="note" style="margin-top:6px">${esc(t.note)}</div>` : ""}</div>`;
+}
 function renderAsk() {
   const V = $("#askbar"); if (!V || !ASK.open) return;
-  const keepScroll = $(".ask-out")?.scrollTop || 0;
+  const prevOut = $(".ask-out"); const atBottom = !prevOut || prevOut.scrollHeight - prevOut.scrollTop - prevOut.clientHeight < 40; const keep = prevOut?.scrollTop || 0;
+  const draft = $("#aq")?.value ?? ASK.q;
+  const conv = ASK.turns.map(bubbleHTML).join("");
+  const empty = `<div class="ask-empty"><p>Ask in your own shorthand. Claude searches your slides and submissions itself, looks at the relevant screens, and replies with cited points and an argument outline. Ask follow-ups in the same chat.</p>
+     <p class="note">References like <span class="ref" style="cursor:default">6-2 p4</span> open beside this panel. Tick “send open page” to show Claude the slide or screen you're looking at.</p>
+     ${ASK.chats.length ? `<div class="sec" style="margin-top:14px"><span>Earlier chats</span></div><div class="hist">${ASK.chats.map(c => `<button class="item" data-chat="${esc(c.id)}"><div class="nm" style="font-weight:600;font-size:14px">${esc(c.title)}</div><div class="tag">${esc(CONTEXTS.find(x => x[0] === c.ctx)?.[1] || "")} · ${c.turns.filter(t => t.role === "user").length} message(s) · ${new Date(c.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div></button>`).join("")}</div>` : ""}</div>`;
+  const lastUser = [...ASK.turns].reverse().find(t => t.role === "user");
   V.innerHTML = `<div class="ask-resize" id="askResize" title="Drag to resize"></div>
-   <div class="ask-head"><b>Ask Claude</b><span class="note">cites your sources, doesn't write the answer</span><span class="spacer"></span><button class="iconbtn" id="askClose" aria-label="Close panel" title="Close (Alt+3)">×</button></div>
+   <div class="ask-head"><b>Ask Claude</b><span class="spacer"></span>${ASK.turns.length ? `<button class="btn" id="askNew" style="padding:3px 10px;font-size:13px">New chat</button>` : ""}<button class="iconbtn" id="askClose" aria-label="Close panel" title="Close (Alt+3)">×</button></div>
+   <div class="ask-out" id="askOut">${conv || empty}
+     ${lastUser && !ASK.busy ? `<details class="src"><summary>What was sent with the last message</summary><div class="vtext">${esc(lastUser.content)}</div></details>` : ""}</div>
    <div class="ask-form">
-     <textarea class="ta" id="aq" placeholder="Question in your own words, e.g. self-checkout interview plan: 2 problems + 2 alternatives">${esc(ASK.q)}</textarea>
+     <textarea class="ta" id="aq" placeholder="${ASK.turns.length ? "Follow-up… e.g. expand (b), or use Phase II instead" : "e.g. eval P3 proto: frequency + recency"}">${esc(draft)}</textarea>
      <div class="ask-row"><select id="actx" aria-label="Context">${CONTEXTS.map(([k, n]) => `<option value="${k}" ${ASK.ctx === k ? "selected" : ""}>${n}</option>`).join("")}</select>
-       <select id="atier" aria-label="Depth">${[["quick", "Fast"], ["default", "Balanced"], ["complex", "Deepest (slow)"]].map(([k, n]) => `<option value="${k}" ${ASK.tier === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>
-     <div class="ask-row"><button class="btn primary" id="askGo" ${ASK.busy ? "disabled" : ""}>Find relevant points <span class="mono" style="opacity:.75">Ctrl+↵</span></button>${ASK.busy ? `<button class="btn" id="askStop">Stop</button>` : ""}<span class="note" id="askNote"></span></div>
-   </div>
-   <div class="ask-out"><div class="answer" id="aout">${ASK.out ? mdToHtml(ASK.out) : `<p class="note">Answers appear here. Click any reference like <span class="ref" style="cursor:default">6-2 p4</span> to open that slide beside this panel.</p>`}</div>
-     ${ASK.sources ? `<details class="src"><summary>What was sent to Claude</summary><div class="vtext">${esc(ASK.sources)}</div></details>` : ""}
-     ${ASK.hist.length ? `<details class="src" ${ASK.out ? "" : "open"}><summary>Earlier questions (${ASK.hist.length})</summary><div class="hist" style="margin-top:6px">${ASK.hist.slice(0, 12).map((h, i) => `<button class="item" data-hist="${i}"><div class="nm" style="font-weight:600;font-size:14px">${esc(h.q.slice(0, 90))}</div><div class="tag">${esc(CONTEXTS.find(c => c[0] === h.ctx)?.[1] || h.ctx)} · ${new Date(h.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div></button>`).join("")}</div></details>` : ""}</div>`;
+       <select id="atier" aria-label="Model">${Object.entries(TIERS).map(([k, v]) => `<option value="${k}" ${ASK.tier === k ? "selected" : ""}>${v.label}</option>`).join("")}</select></div>
+     <div class="ask-row"><label class="note" style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" id="awith" ${ASK.withOpen ? "checked" : ""}> send open page as image</label><span class="spacer"></span>
+       ${ASK.busy ? `<button class="btn" id="askStop">Stop</button>` : `<button class="btn primary" id="askGo">${ASK.turns.length ? "Send" : "Ask"} <span class="mono" style="opacity:.75">Ctrl+↵</span></button>`}</div>
+     <div class="note" id="askNote"></div>
+   </div>`;
   const aq = $("#aq"); aq.addEventListener("input", () => ASK.q = aq.value);
   aq.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runAsk(); } });
   $("#actx").onchange = e => ASK.ctx = e.target.value;
-  $("#atier").onchange = e => ASK.tier = e.target.value;
-  $("#askGo").onclick = runAsk;
-  $("#askClose").onclick = () => toggleAsk(false);
+  $("#atier").onchange = e => { ASK.tier = e.target.value; store.set("asktier", ASK.tier); };
+  $("#awith").onchange = e => { ASK.withOpen = e.target.checked; store.set("askwithopen", ASK.withOpen); };
+  if ($("#askGo")) $("#askGo").onclick = runAsk;
   if ($("#askStop")) $("#askStop").onclick = () => ASK.ctl?.abort();
+  if ($("#askNew")) $("#askNew").onclick = newChat;
+  $("#askClose").onclick = () => toggleAsk(false);
   if (!sampleFn && sampleChecked) $("#askNote").textContent = "Claude isn't available in this view.";
-  const out = $(".ask-out"); if (out) out.scrollTop = keepScroll;
+  const out = $("#askOut"); if (out) out.scrollTop = atBottom ? out.scrollHeight : keep;
   const h = $("#askResize");
   h.onpointerdown = e => {
     e.preventDefault(); h.setPointerCapture(e.pointerId); h.classList.add("drag");
@@ -821,80 +860,168 @@ function renderAsk() {
     h.addEventListener("pointermove", move); h.addEventListener("pointerup", up, { once: true });
   };
 }
-function buildPrompt(q, ctx) {
-  const MAX = 200000;
+
+/* material bundle: a starting point; with tools Claude fetches the rest itself */
+function relevantConcepts(q) {
   const ids = new Set(suggestConcepts(q));
-  search(q, d => d.type === "concept").slice(0, 6).forEach(h => ids.add(h.d.key));
-  const relC = [...ids].map(id => CBYID[id]).filter(Boolean);
-  const cardTxt = c => [`## ${c.name} [${c.id}] — lecture ${c.lecture}`, c.summary,
-    ...(c.points || []).map(p => `- ${p.text} [${p.ref}]`), "Evaluate: " + (c.apply || []).join(" | "),
-    ...(c.limits || []).map(p => `- Limit: ${p.text} [${p.ref}]`), ...(c.examples || []).map(p => `- Example: ${p.text} [${p.ref}]`)].join("\n");
-  const index = CONCEPTS.map(c => `${c.name} (${c.lecture}): ${c.summary}`).join("\n");
-  const ev = relC.flatMap(c => (EVID[c.id] || []).map(e => `- (${c.name}) [${e.ref}] ${e.phase} · ${SCREENS[e.screen]?.name || ""} · ${e.stance.toUpperCase()}: ${e.point} → ${e.argue || ""}`)).join("\n");
+  search(q, d => d.type === "concept").slice(0, 5).forEach(h => ids.add(h.d.key));
+  return [...ids].map(id => CBYID[id]).filter(Boolean);
+}
+function cardTxt(c) {
+  return [`## ${c.name} [id: ${c.id}] — lecture ${c.lecture}`, c.summary,
+    ...(c.points || []).map(p => `- ${p.text} [${p.ref}]`), "Evaluate by asking: " + (c.apply || []).join(" | "),
+    ...(c.limits || []).map(p => `- Limit: ${p.text} [${p.ref}]`), ...(c.examples || []).map(p => `- Example: ${p.text} [${p.ref}]`),
+    ...(c.quotes || []).map(p => `- Quote: “${p.text}” [${p.ref}]`)].join("\n");
+}
+function evTxt(e, c) { return `- (${c ? c.name : ""}) [${e.ref}] ${e.phase} · ${SCREENS[e.screen]?.name || ""} · ${String(e.stance).toUpperCase()}: ${e.point} → ${e.argue || ""}`; }
+function pageRec(k) { const i = k.lastIndexOf(" p"); const d = k.slice(0, i), p = +k.slice(i + 2); const doc = DOCS[d]; return doc && doc.pages[p - 1] != null ? { ref: d + " p" + p, title: doc.title, text: doc.pages[p - 1] } : null; }
+function buildBundle(q, ctx, lean) {
+  const relC = relevantConcepts(q), ids = new Set(relC.map(c => c.id));
+  const index = CONCEPTS.map(c => `${c.id} · ${c.name} (${c.lecture}): ${c.summary}`).join("\n");
+  const ev = relC.flatMap(c => (EVID[c.id] || []).map(e => evTxt(e, c))).join("\n");
   const inc = (DATA.incidents || []).filter(e => ctx === "error" || (e.concepts || []).some(x => ids.has(x))).map(e => `- [${e.ref}] ${e.who}: ${e.what} (angle: ${e.angle}; concepts: ${(e.concepts || []).join(", ")})`).join("\n");
   const meth = (DATA.methods || []).filter(m => ids.has(m.concept) || ctx === "scenario").map(m => `- [${m.ref}] ${m.concept}: ${m.what}. Worked: ${m.worked}. Problems: ${m.problems}`).join("\n");
-  const scr = (DATA.screens || []).filter(s => ctx === "general" || ctx === "error" || ctx === "scenario" ? false : s.phase === ctx).map(s => `- [${s.ref}] ${s.name}: ${s.desc}`).join("\n");
+  const scr = (DATA.screens || []).filter(s => s.phase === ctx).map(s => `- [${s.ref}] ${s.name}: ${s.desc}`).join("\n");
   const GENERIC = /\b(eval\w*|analy\w*|prototypes?|proto|phase|p[123]|i{1,3}|using|use|your|own|question|part|parts|design|give|suggest|two|2|explain|discuss|describe|wrt|respect|perspective|principles?|via|eg|e\.g)\b/gi;
   const slideQ = q.replace(GENERIC, " ") + " " + relC.slice(0, 4).map(c => c.name + " " + (c.aliases || []).slice(0, 3).join(" ")).join(" ");
-  const pageOf = k => { const [d, p] = [k.slice(0, k.lastIndexOf(" p")), +k.slice(k.lastIndexOf(" p") + 2)]; return DOCS[d] && DOCS[d].pages[p - 1] != null ? `### [${k}] ${DOCS[d].title}\n${DOCS[d].pages[p - 1]}` : null; };
-  const cited = [], seen = new Set();
-  const addKey = (k, arr) => { if (k && !seen.has(k)) { seen.add(k); arr.push(k); } };
-  for (const c of relC.slice(0, 5)) for (const p of [...(c.points || []), ...(c.limits || []), ...(c.examples || [])]) { const n = normRef(p.ref); if (n && !/^P/.test(n.doc)) addKey(n.doc + " p" + n.page, cited); }
-  search(slideQ, d => d.type === "slide").slice(0, 10).forEach(h => addKey(h.d.key, cited));
-  const slides = cited.slice(0, 40).map(pageOf).filter(Boolean).join("\n\n");
-  const mine = [];
-  for (const c of relC) for (const e of (EVID[c.id] || [])) { const n = normRef(e.ref); if (n && (ctx !== "P2" && ctx !== "P3" || n.doc === ctx)) addKey(n.doc + " p" + n.page, mine); }
+  const seen = new Set(), cited = [], mine = [];
+  const add = (k, arr) => { if (k && !seen.has(k)) { seen.add(k); arr.push(k); } };
+  for (const c of relC.slice(0, 4)) for (const p of [...(c.points || []), ...(c.limits || []), ...(c.examples || [])]) { const n = normRef(p.ref); if (n && !/^P/.test(n.doc)) add(n.doc + " p" + n.page, cited); }
+  search(slideQ, d => d.type === "slide").slice(0, lean ? 6 : 10).forEach(h => add(h.d.key, cited));
+  for (const c of relC) for (const e of (EVID[c.id] || [])) { const n = normRef(e.ref); if (n && (ctx !== "P2" && ctx !== "P3" || n.doc === ctx)) add(n.doc + " p" + n.page, mine); }
   const subF = ctx === "P2" || ctx === "P3" ? d => d.type === "mine" && d.key.startsWith(ctx) : d => d.type === "mine";
-  search(slideQ, subF).slice(0, 6).forEach(h => addKey(h.d.key, mine));
-  const subs = mine.slice(0, 14).map(pageOf).filter(Boolean).join("\n\n");
-  const ctxName = CONTEXTS.find(c => c[0] === ctx)?.[1] || ctx;
-  const instr = `You are helping Billy, a final-year CS student, during an OPEN-BOOK online exam for COMPX324 User Experience Design (University of Waikato, 2026; lecturer David Nichols). He typed the exam question below in his own shorthand. Your job is NOT to write his answer. Your job is to tell him which points from which of his course resources are relevant, and how they could be used to build an argument, so he can write the answer himself.
+  search(slideQ, subF).slice(0, 4).forEach(h => add(h.d.key, mine));
+  const pg = k => { const r = pageRec(k); return r ? `### [${r.ref}] ${r.title}\n${r.text}` : null; };
+  const text = ["=== CONCEPT INDEX (id · name (lecture): summary) ===\n" + index,
+    "=== CONCEPT CARDS MATCHED BY KEYWORD ===\n" + relC.map(cardTxt).join("\n\n"),
+    ev && "=== HIS MAPPED PROJECT EVIDENCE ===\n" + ev,
+    scr && `=== HIS ${ctx} PROTOTYPE SCREENS ===\n` + scr,
+    inc && "=== REAL INCIDENTS / ERRORS FROM HIS PROJECT ===\n" + inc,
+    meth && "=== UX METHODS HE ACTUALLY USED ===\n" + meth,
+    "=== SLIDE PAGES (keyword-matched starting set) ===\n" + cited.slice(0, lean ? 18 : 40).map(pg).filter(Boolean).join("\n\n"),
+    "=== PAGES FROM HIS SUBMISSIONS (starting set) ===\n" + mine.slice(0, lean ? 8 : 14).map(pg).filter(Boolean).join("\n\n")].filter(Boolean).join("\n\n");
+  return { text, ids: relC.map(c => c.id) };
+}
+function askInstructions(tools) {
+  return `You are helping Billy, a final-year Computer Science student, during an OPEN-BOOK online exam for COMPX324 User Experience Design (University of Waikato, 2026; lecturer David Nichols). He types exam questions in his own shorthand. Questions usually apply a course concept to a context: his own Phase II paper prototype or Phase III group digital prototype (a personal-finance app), an error he made himself, or a given scenario.
 
-Question (his shorthand): ${q}
-Context he chose: ${ctxName}
+Unless he asks for something else, reply in Markdown with:
+**What it's asking**: 1–2 lines: the parts, the command words, what a strong answer needs.
+**Relevant points**: per part, the most relevant lecture points in the lecturer's terms, each with its reference.
+**Evidence from his project**: specific screens, findings or incidents he can cite (only when the context is his prototype or his own error), each marked supports / violates / mixed.
+**Argument outline**: per part: claim → evidence → reasoning linking evidence to the principle → counterpoint or trade-off → improvement. Terse bullets.
+**Watch out**: 1–3 traps or confusions to avoid.
+Follow-ups may ask for something different (expand one part, switch phase, compare, more evidence, tighten wording). Do what he asks.
 
-Reply in Markdown with exactly these sections:
-## What it's asking
-One or two lines: the parts (a)/(b), the command words (evaluate / analyse / give / suggest / compare), and what a strong answer must contain.
-## Relevant points
-For each part, the 3–6 most relevant lecture points. One bullet each: the point in a few words, then its reference in square brackets exactly as given in the material, e.g. [6-2 p4]. Prefer the lecturer's terms.
-## Evidence from his project
-Specific screens, findings or incidents from his own submissions that he can cite, with refs like [P3 p9], and whether each supports or violates the principle. Skip this section if the context is a given scenario or general.
-## Argument outline
-Per part: Claim → Evidence (ref) → Reasoning that links evidence to the principle → Counterpoint or trade-off → Improvement. Terse bullets, not prose paragraphs.
-## Watch out
-1–3 traps: common misreadings, confusions between similar concepts, or limitations he should acknowledge.
-
-Rules: cite only references that appear in the material below; never invent page numbers. If the material doesn't cover something, say "not in your material" and give general UX knowledge marked (general). Be concise: he is under time pressure.`;
-  const parts = [instr,
-    "\n=== CONCEPT INDEX (all examinable concepts) ===\n" + index,
-    "\n=== MOST RELEVANT CONCEPT CARDS ===\n" + relC.map(cardTxt).join("\n\n"),
-    ev ? "\n=== HIS MAPPED PROJECT EVIDENCE ===\n" + ev : "",
-    scr ? "\n=== HIS PROTOTYPE SCREENS (" + ctx + ") ===\n" + scr : "",
-    inc ? "\n=== REAL INCIDENTS / ERRORS FROM HIS PROJECT ===\n" + inc : "",
-    meth ? "\n=== METHODS HE ACTUALLY USED ===\n" + meth : "",
-    "\n=== BEST-MATCHING LECTURE SLIDE PAGES ===\n" + slides,
-    "\n=== BEST-MATCHING PAGES FROM HIS SUBMISSIONS ===\n" + subs];
-  let p = parts.join("\n");
-  if (new Blob([p]).size > MAX) p = p.slice(0, MAX * 0.95);
-  return p;
+${tools ? `Research: you have tools over ALL of his material: search_material, read_pages, get_concept, project_evidence. The material below is only a keyword-matched starting set and may miss the best pages. Before answering, use the tools to confirm the lecture's exact wording and to find the strongest evidence in his submissions (2–6 calls is typical; read the pages you plan to cite). Don't narrate tool use; write only the final answer.
+` : ""}Images: when images are attached, they are listed with their references; use them for visual details (layout, position, size, labels) and say what you see.
+Citations: give every claim drawn from his material a reference in square brackets, exactly like [6-2 p4] or [P3 p14] (lecture ids 1-1 … 12-1, 7-1 = AI lecture, INT-Q; P1/P2/P3 = his Phase I/II/III submissions). Only cite pages you have actually seen in this conversation. Mark anything from outside his material as (general). Be concise; he is under time pressure.`;
+}
+const TOOLS = [
+  { name: "search_material", description: "Typo-tolerant ranked keyword search over every lecture slide (including text read from slide images), Billy's Phase I–III submissions, the concept cards and his mapped project evidence. Returns up to 12 hits {ref, type, title, snippet}. Run focused searches using lecture vocabulary; then read_pages for full text.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, scope: { type: "string", enum: ["all", "slides", "submissions", "concepts", "evidence"] } }, required: ["query"] },
+    execute(input) {
+      const query = String(input.query || ""), scope = String(input.scope || "all"); askStatus(`Searching “${query}”…`);
+      const f = { all: null, slides: d => d.type === "slide", submissions: d => d.type === "mine", concepts: d => d.type === "concept", evidence: d => /evidence|incident/.test(d.type) }[scope] || null;
+      return search(query, f).slice(0, 12).map(({ d }) => {
+        if (d.type === "concept") return { ref: "concept:" + d.key, type: "concept", title: d.title, snippet: CBYID[d.key]?.summary };
+        if (d.type === "evidence") { const [cid, i] = d.key.split(":"); const e = EVID[cid][+i]; return { ref: e.ref, type: "evidence", title: d.title, snippet: `${e.stance}: ${e.point}` }; }
+        if (d.type === "incident") { const e = DATA.incidents[+d.key.split(":")[1]]; return { ref: e.ref, type: "incident", title: d.title, snippet: e.what }; }
+        return { ref: d.key, type: d.type === "mine" ? "submission page" : "slide", title: d.title, snippet: plainSnippet(d.text, query) };
+      });
+    } },
+  { name: "read_pages", description: "Full extracted text of up to 6 pages, by reference like \"6-2 p4\" or \"P3 p14\". Slides include text read from images. Use before citing a page.",
+    inputSchema: { type: "object", properties: { refs: { type: "array", items: { type: "string" } } }, required: ["refs"] },
+    execute(input) {
+      const refs = (Array.isArray(input.refs) ? input.refs : [input.refs]).map(String).slice(0, 6); askStatus(`Reading ${refs.join(", ")}…`);
+      return refs.map(r => { const n = normRef(r); const rec = n && pageRec(n.doc + " p" + n.page); return rec ? { ...rec, text: rec.text.slice(0, 4500) } : { ref: r, error: "no such page" }; });
+    } },
+  { name: "get_concept", description: "A full concept card (definition, every lecture point with references, evaluation checklist, limits, examples, quotes) plus Billy's mapped project evidence for it. Pass the concept id or name.",
+    inputSchema: { type: "object", properties: { concept: { type: "string" } }, required: ["concept"] },
+    execute(input) {
+      const k = String(input.concept || "").toLowerCase(); askStatus(`Opening the ${k} card…`);
+      const c = CBYID[k] || CONCEPTS.find(c => c.name.toLowerCase() === k || (c.aliases || []).some(a => a.toLowerCase() === k)) || CBYID[search(k, d => d.type === "concept")[0]?.d.key];
+      if (!c) throw new Error("No concept matches " + k);
+      return cardTxt(c) + "\n\nHis evidence:\n" + ((EVID[c.id] || []).map(e => evTxt(e, c)).join("\n") || "(none mapped)");
+    } },
+  { name: "project_evidence", description: "Billy's own project material filtered by phase (P1, P2, P3) and/or concept id: mapped evidence items, the index of his prototype screens with descriptions, real incidents/errors, and the UX methods he used.",
+    inputSchema: { type: "object", properties: { phase: { type: "string", enum: ["P1", "P2", "P3", "any"] }, concept: { type: "string" } } },
+    execute(input) {
+      const ph = String(input.phase || "any"), cid = String(input.concept || ""); askStatus(`Checking your ${ph === "any" ? "project" : ph} evidence…`);
+      const okP = r => ph === "any" || String(r || "").startsWith(ph);
+      const ev = Object.entries(EVID).filter(([k]) => !cid || k === cid).flatMap(([k, a]) => a.filter(e => ph === "any" || e.phase === ph).map(e => evTxt(e, CBYID[k])));
+      return [`Evidence:\n${ev.join("\n") || "(none)"}`,
+        `Screens:\n${(DATA.screens || []).filter(s => ph === "any" || s.phase === ph).map(s => `- [${s.ref}] ${s.name}: ${s.desc}`).join("\n")}`,
+        `Incidents:\n${(DATA.incidents || []).filter(e => okP(e.ref) && (!cid || (e.concepts || []).includes(cid))).map(e => `- [${e.ref}] ${e.who}: ${e.what} (${e.angle})`).join("\n") || "(none)"}`,
+        `Methods:\n${(DATA.methods || []).filter(m => okP(m.ref) && (!cid || m.concept === cid)).map(m => `- [${m.ref}] ${m.concept}: ${m.what}. Worked: ${m.worked}. Problems: ${m.problems}`).join("\n") || "(none)"}`].join("\n\n").slice(0, 30000);
+    } }
+];
+function plainSnippet(text, q, n = 240) {
+  text = String(text || "").replace(/\s+/g, " "); const re = hlRe(q); let i = 0;
+  if (re) { const m = re.exec(text); if (m) i = Math.max(0, m.index - 70); }
+  return (i > 0 ? "…" : "") + text.slice(i, i + n) + (i + n < text.length ? "…" : "");
+}
+async function refBlob(ref) {
+  const n = normRef(ref); if (!n) return null; const key = n.doc + " p" + n.page;
+  let src = IMGS[key]; if (!src && (DATA.packs || []).includes(n.doc)) src = await pageImg(n.doc, n.page);
+  if (!src) return null;
+  const r = await fetch(src); return r.ok ? await r.blob() : null;
+}
+async function pickImages(q, ctx, first) {
+  const max = Math.min(sampleLimits?.images?.maxCount || 0, 4); if (!max) return { refs: [], blobs: [] };
+  const refs = [];
+  const add = r => { const n = normRef(r); if (n) { const k = n.doc + " p" + n.page; if (!refs.includes(k)) refs.push(k); } };
+  if (ASK.withOpen && S.view === "lookup" && S.detail?.type === "page") add(S.detail.ref);
+  if (first) {
+    const relC = relevantConcepts(q).slice(0, 3);
+    if (ctx === "P2" || ctx === "P3") for (const c of relC) for (const e of (EVID[c.id] || [])) if (e.phase === ctx) add(e.ref);
+    for (const c of relC.slice(0, 2)) for (const r of (c.keySlides || [])) add(r);
+  }
+  const out = { refs: [], blobs: [] };
+  for (const r of refs) { if (out.blobs.length >= max) break; try { const b = await refBlob(r); if (b) { out.refs.push(r); out.blobs.push(b); } } catch {} }
+  return out;
+}
+function sendTurns() {
+  let turns = ASK.turns.filter(t => !t.pending).map(t => ({ role: t.role, content: t.content || "(no answer)" }));
+  const size = () => turns.reduce((a, t) => a + t.content.length, 0);
+  while (size() > 230000 && turns.length > 3) turns.splice(1, 2);
+  return turns;
 }
 async function runAsk() {
-  const q = ($("#aq")?.value || ASK.q).trim(); if (!q || ASK.busy) return;
-  ASK.q = q;
+  const q = ($("#aq")?.value || "").trim(); if (!q || ASK.busy) return;
   if (!sampleFn) { toast("Claude isn't available in this view"); return; }
-  const prompt = buildPrompt(q, ASK.ctx);
-  ASK.sources = prompt; ASK.out = ""; ASK.busy = true; ASK.ctl = new AbortController();
-  renderAsk(); $(".ask-out").scrollTop = 0; $("#aout").innerHTML = `<div class="thinking"><span class="dot"></span>Thinking… the deeper settings can take up to a minute.</div>`;
+  const first = !ASK.turns.length, tools = !!sampleLimits?.tools, ctxName = CONTEXTS.find(c => c[0] === ASK.ctx)?.[1] || ASK.ctx;
+  ASK.busy = true; ASK.ctl = new AbortController(); ASK.q = ""; $("#aq").value = "";
+  const pending = { role: "assistant", content: "", show: "", pending: true };
+  const user = { role: "user", content: "", show: q, ctx: ASK.ctx, imgs: [] };
+  ASK.turns.push(user, pending); askStatus("Gathering material…"); renderAsk();
+  const { refs, blobs } = await pickImages(q, ASK.ctx, first).catch(() => ({ refs: [], blobs: [] }));
+  user.imgs = refs;
+  const imgNote = refs.length ? `\n\nAttached images, in order: ${refs.map(r => `[${r}] (${docTitle(r.split(" p")[0])})`).join("; ")}` : "";
+  if (first) {
+    const b = buildBundle(q, ASK.ctx, tools); ASK.sent = b.ids; ASK.lastCtx = ASK.ctx;
+    user.content = askInstructions(tools) + `\n\nContext he chose: ${ctxName}\nQuestion: ${q}${imgNote}\n\n` + b.text;
+  } else {
+    const fresh = relevantConcepts(q).filter(c => !ASK.sent.includes(c.id)).slice(0, 3); ASK.sent.push(...fresh.map(c => c.id));
+    user.content = (ASK.ctx !== ASK.lastCtx ? `(Context changed to: ${ctxName})\n` : "") + q + imgNote + (fresh.length ? "\n\n[Possibly relevant cards for this follow-up]\n" + fresh.map(cardTxt).join("\n\n") : "");
+    ASK.lastCtx = ASK.ctx;
+  }
+  renderAsk(); askStatus(tools ? "Thinking and searching your material…" : "Thinking…");
+  const tier = TIERS[ASK.tier];
+  const opts = { ...tier.opts, signal: ASK.ctl.signal, cache: false, onText: ({ text }) => { pending.show = text; const el = document.querySelector(`.bub.bot[data-turn="${ASK.turns.indexOf(pending)}"] .answer`); if (el) { el.innerHTML = mdToHtml(text); const o = $("#askOut"); if (o && o.scrollHeight - o.scrollTop - o.clientHeight < 120) o.scrollTop = o.scrollHeight; } } };
+  if (tools) { opts.tools = TOOLS; delete opts.cache; opts.cache = false; }
+  if (blobs.length) opts.images = blobs;
   try {
-    const r = await sampleFn(prompt, { signal: ASK.ctl.signal, modelTier: ASK.tier, onText: ({ text }) => { ASK.out = text; const o = $("#aout"); if (o) o.innerHTML = mdToHtml(text); } });
-    ASK.out = r.text; if (r.truncated) ASK.out += "\n\n*(Cut short — ask about one part at a time.)*";
-    ASK.hist.unshift({ q, ctx: ASK.ctx, t: Date.now(), out: ASK.out }); ASK.hist = ASK.hist.slice(0, 20); store.set("askhist", ASK.hist);
+    const r = await sampleFn(sendTurns().concat(), opts);
+    pending.show = r.text; if (r.truncated) pending.note = "Cut short at the length limit. Ask for one part at a time.";
+    if (tier.opts.model && r.modelApplied !== tier.opts.model) pending.note = (pending.note ? pending.note + " " : "") + `Opus 5.5 wasn't available, so the ${r.modelTierApplied} tier answered.`;
   } catch (e) {
-    ASK.out = e?.text || "";
-    const msg = { cancelled: "", not_granted: "Claude access was declined for this page. Reload to be asked again.", sampling_disabled: "Claude isn't available on this account.", rate_limited: "Usage limit or too many requests. Wait a minute, then try again.", prompt_too_large: "Too much material was selected. Shorten the question.", refused: "Claude declined this one. Rephrase the question.", session_expired: "Sign in to Claude again, then retry." }[e?.code];
-    if (msg !== "") ASK.out += (ASK.out ? "\n\n" : "") + "**" + (msg || "Something went wrong reaching Claude. Try again.") + "**";
-  } finally { ASK.busy = false; renderAsk(); }
+    pending.show = e?.text || "";
+    pending.note = { cancelled: "Stopped.", not_granted: "Claude access was declined for this page. Reload to be asked again.", sampling_disabled: "Claude isn't available on this account.", rate_limited: "Usage limit or too many requests. Wait a minute, then try again.", prompt_too_large: "Too much material in this chat. Start a new chat.", refused: "Claude declined this one. Rephrase the question.", session_expired: "Sign in to Claude again, then retry.", images_unavailable: "Images couldn't be sent from this view. Untick “send open page”.", image_rejected: "An image was rejected. Untick “send open page” and retry." }[e?.code] || "Something went wrong reaching Claude. Try again.";
+  } finally {
+    delete pending.pending; pending.content = pending.show || "(no answer)"; ASK.busy = false; ASK.status = "";
+    saveChat(); renderAsk();
+  }
 }
 function mdToHtml(md) {
   const lines = esc(md).split("\n"); let html = "", list = null;
@@ -1001,9 +1128,9 @@ document.addEventListener("click", e => {
   if (ds.rm) { B.ids = B.ids.filter(x => x !== ds.rm); (B.removed ||= []).push(ds.rm); store.set("build", B); return renderBuild(); }
   if (t.id === "bclear") { Object.assign(B, { q: "", ids: [], ticks: {}, removed: [], ctxManual: false }); store.set("build", B); return renderBuild(); }
   if (t.id === "bcopy") return copy(outline());
-  if (t.id === "toAsk") { ASK.q = B.q + (B.ids.length ? "\nConcepts: " + B.ids.map(i => CBYID[i]?.name).join(", ") : ""); ASK.ctx = CONTEXTS.some(c => c[0] === B.ctx) ? B.ctx : "general"; ASK.out = ""; ASK.sources = ""; toggleAsk(true); return; }
+  if (t.id === "toAsk") { newChat(); ASK.q = B.q + (B.ids.length ? "\nConcepts: " + B.ids.map(i => CBYID[i]?.name).join(", ") : ""); ASK.ctx = CONTEXTS.some(c => c[0] === B.ctx) ? B.ctx : "general"; toggleAsk(true); const a = $("#aq"); if (a) a.value = ASK.q; return; }
   if (t.id === "askToggle") return toggleAsk();
-  if (ds.hist) { const h = ASK.hist[+ds.hist]; Object.assign(ASK, { q: h.q, ctx: h.ctx, out: h.out, sources: "" }); return renderAsk(); }
+  if (ds.chat) { const c = ASK.chats.find(x => x.id === ds.chat); if (c) { Object.assign(ASK, { turns: c.turns.map(t => ({ ...t })), chatId: c.id, sent: c.sent || [], lastCtx: c.lastCtx || c.ctx, ctx: c.lastCtx || c.ctx }); renderAsk(); } return; }
   if (ds.deldoc) { IDB.del(ds.deldoc); delete DOCS[ds.deldoc]; pdfCache.delete(ds.deldoc); buildIndex(); return renderLibrary(); }
   if (t.id === "clockBtn") { e.stopPropagation(); return toggleTimer(); }
 });
@@ -1048,6 +1175,7 @@ async function boot() {
   if (MODE === "personal" && window.claude?.use) {
     try { sampleFn = await window.claude.use("sample"); } catch { sampleFn = null; }
     sampleChecked = true;
+    if (sampleFn) sampleLimits = await sampleFn.limits().catch(() => null);
     if (!sampleFn) { const n = $("#askNote"); if (n) n.textContent = "Claude isn't available in this view."; }
   }
 }
