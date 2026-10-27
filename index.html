@@ -55,13 +55,15 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .iconbtn{border:1px solid var(--line);background:var(--surface);border-radius:999px;width:28px;height:28px;display:grid;place-items:center;cursor:pointer;font-size:13px;line-height:1}
 
 /* panes */
-.main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(320px,400px) 1fr}
+.body{flex:1;min-height:0;display:flex}
+.mainwrap{flex:1;min-width:0;min-height:0;display:flex;container-type:inline-size;container-name:mainwrap}
+.main{flex:1;min-width:0;min-height:0;display:grid;grid-template-columns:minmax(300px,380px) 1fr}
 .pane{min-width:0;min-height:0;overflow:auto;padding-block:14px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
 .left{border-right:1px solid var(--line);background:var(--bg)}
 .right{background:var(--bg)}
 .single{grid-template-columns:1fr}
 .single .pane{max-width:1100px;width:100%;margin:0 auto}
-@media (max-width:880px){
+@container mainwrap (max-width:760px){
   .main{grid-template-columns:1fr}
   .main.has-detail .left{display:none}
   .main:not(.has-detail) .right{display:none}
@@ -220,6 +222,27 @@ details.ptext-d summary{cursor:pointer;font-weight:600;color:var(--muted);font-s
 .ptext li::marker{color:var(--accent)}
 .pt-run{display:flex;flex-direction:column;gap:2px;margin:0 0 10px;padding-left:10px;border-left:2px solid var(--line)}
 .pt-links{display:flex;flex-direction:column;gap:2px;margin-top:10px;font-size:12px;color:var(--muted);overflow-wrap:anywhere;font-family:var(--font-mono)}
+
+/* Ask Claude side panel */
+.askbar{position:relative;flex:0 0 var(--askw,440px);width:var(--askw,440px);max-width:70vw;min-width:320px;border-left:1px solid var(--line);background:var(--surface);display:flex;flex-direction:column;min-height:0}
+.ask-resize{position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:2}
+.ask-resize:hover,.ask-resize.drag{background:var(--accent-soft)}
+.ask-head{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
+.ask-head b{font-size:15px;font-weight:800;white-space:nowrap}
+@media (max-width:560px){.ask-head .note{display:none}}
+.ask-form{padding:12px 14px;border-bottom:1px solid var(--line);display:grid;gap:8px;background:var(--bg)}
+.ask-form .ta{min-height:70px;font-size:14.5px}
+.ask-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ask-row select{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:5px 8px;font-size:13.5px;min-width:0;flex:1}
+.ask-out{flex:1;min-height:0;overflow:auto;padding:12px max(14px,env(safe-area-inset-right,0px)) calc(16px + env(safe-area-inset-bottom,0px)) 14px}
+.ask-out .answer{font-size:14.5px}
+.ask-out .answer h3:first-child{margin-top:0}
+.tab.asktoggle[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);box-shadow:var(--shadow)}
+.tab.asktoggle[aria-pressed="true"] kbd{color:var(--accent-ink)}
+@media (max-width:900px){
+  .askbar{position:fixed;right:0;top:0;bottom:0;z-index:15;width:min(100vw,460px);max-width:100vw;min-width:0;box-shadow:-8px 0 24px rgba(0,0,0,.18);padding-top:env(safe-area-inset-top,0px)}
+  .ask-resize{display:none}
+}
 [hidden]{display:none!important}
 </style>
 
@@ -232,7 +255,7 @@ details.ptext-d summary{cursor:pointer;font-weight:600;color:var(--muted);font-s
     <div class="clock" id="clock" title="2-hour exam countdown. Press ▶ when the exam starts."><span class="q" id="clockQ">exam</span><span class="t" id="clockT">2:00:00</span>
       <button class="iconbtn" id="clockBtn" aria-label="Start timer">▶</button><button class="iconbtn" id="clockReset" aria-label="Reset timer" title="Reset to 2:00:00" hidden>↺</button></div>
   </header>
-  <div class="main" id="main"></div>
+  <div class="body"><div class="mainwrap"><div class="main" id="main"></div></div><aside class="askbar" id="askbar" hidden aria-label="Ask Claude"></aside></div>
 </div>
 <div class="toast" id="toast" hidden></div>
 
@@ -376,7 +399,6 @@ function buildIndex() {
 
 /* ---------- state + routing ---------- */
 const VIEWS = [["lookup", "Lookup", "1"], ["build", "Build answer", "2"]];
-if (MODE === "personal") VIEWS.push(["ask", "Ask Claude", "3"]);
 if (MODE === "public") VIEWS.push(["library", "My material", "3"]);
 const S = { view: "lookup", q: "", filter: "all", detail: null, sel: null };
 function setView(v) { if (v !== S.view) pushNav(); S.view = v; try { history.replaceState(null, "", "#" + v); } catch {} render(); }
@@ -407,7 +429,8 @@ function renderBack() {
   const mb = document.querySelector(".backbtn"); if (mb) mb.textContent = "← Back to " + (top ? navLabel(top) : "results");
 }
 function renderTabs() {
-  $("#tabs").innerHTML = VIEWS.map(([id, name, k]) => `<button class="tab" role="tab" aria-selected="${S.view === id}" data-view="${id}">${name}<kbd>Alt+${k}</kbd></button>`).join("");
+  $("#tabs").innerHTML = VIEWS.map(([id, name, k]) => `<button class="tab" role="tab" aria-selected="${S.view === id}" data-view="${id}">${name}<kbd>Alt+${k}</kbd></button>`).join("")
+    + (MODE === "personal" ? `<button class="tab asktoggle" id="askToggle" aria-pressed="${ASK.open}" title="Ask Claude panel">Ask Claude<kbd>Alt+3</kbd></button>` : "");
 }
 function openDetail(d) { pushNav(); S.detail = d; S.sel = d.type + ":" + (d.id || d.ref); if (S.view !== "lookup") S.view = "lookup"; render(); $(".right")?.scrollTo(0, 0); }
 
@@ -418,7 +441,6 @@ function render() {
   if (S.view === "lookup") { main.innerHTML = `<section class="pane left" id="left"></section><section class="pane right" id="right"></section>`; renderLeft(); renderRight(); }
   else main.innerHTML = `<section class="pane" id="view"></section>`;
   if (S.view === "build") renderBuild();
-  if (S.view === "ask") renderAsk();
   if (S.view === "library") renderLibrary();
   renderBack();
 }
@@ -760,26 +782,44 @@ function tick() {
 }
 
 /* ---------- Ask Claude (personal) ---------- */
-const ASK = { q: "", ctx: "P3", tier: "default", busy: false, ctl: null, out: "", sources: "", hist: store.get("askhist", []) };
-let sampleFn = null;
+const ASK = { q: "", ctx: "P3", tier: "default", busy: false, ctl: null, out: "", sources: "", hist: store.get("askhist", []), open: store.get("askopen", false) };
+let sampleFn = null, sampleChecked = false;
+function toggleAsk(force) {
+  if (MODE !== "personal") return;
+  ASK.open = force ?? !ASK.open; store.set("askopen", ASK.open);
+  $("#askbar").hidden = !ASK.open; renderTabs();
+  if (ASK.open) { renderAsk(); setTimeout(() => $("#aq")?.focus(), 0); }
+}
 function renderAsk() {
-  const V = $("#view");
-  V.innerHTML = `<div class="grid2" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr))">
-   <div class="card" style="max-width:none"><div class="field"><label for="aq">Question, in your own words</label>
-     <textarea class="ta" id="aq" style="min-height:110px" placeholder="e.g. self-checkout interview plan: 2 problems + 2 alternative methods that fix them">${esc(ASK.q)}</textarea></div>
-     <div class="field"><label>Context</label><div class="seg" id="actx">${CONTEXTS.map(([k, n]) => `<button aria-pressed="${ASK.ctx === k}" data-actx="${k}">${n}</button>`).join("")}</div></div>
-     <div class="field"><label>Depth</label><div class="seg">${[["quick", "Fast (seconds)"], ["default", "Balanced"], ["complex", "Deepest (slow)"]].map(([k, n]) => `<button aria-pressed="${ASK.tier === k}" data-tier="${k}">${n}</button>`).join("")}</div></div>
-     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn primary" id="askGo" ${ASK.busy ? "disabled" : ""}>Find relevant points <span class="mono" style="opacity:.75">Ctrl+Enter</span></button>${ASK.busy ? `<button class="btn" id="askStop">Stop</button>` : ""}<span class="note" id="askNote"></span></div>
-     <p class="note" style="margin-top:10px">Claude gets the concept cards, your mapped evidence and the best-matching slide and submission pages, then returns which points from which sources apply and an argument outline per part. It does not write your answer.</p>
-     ${ASK.hist.length ? `<div class="blk"><h3>Earlier</h3><div class="hist">${ASK.hist.slice(0, 8).map((h, i) => `<button class="item" data-hist="${i}"><div class="nm" style="font-weight:600;font-size:14px">${esc(h.q.slice(0, 90))}</div><div class="tag">${esc(h.ctx)} · ${new Date(h.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div></button>`).join("")}</div></div>` : ""}
+  const V = $("#askbar"); if (!V || !ASK.open) return;
+  const keepScroll = $(".ask-out")?.scrollTop || 0;
+  V.innerHTML = `<div class="ask-resize" id="askResize" title="Drag to resize"></div>
+   <div class="ask-head"><b>Ask Claude</b><span class="note">cites your sources, doesn't write the answer</span><span class="spacer"></span><button class="iconbtn" id="askClose" aria-label="Close panel" title="Close (Alt+3)">×</button></div>
+   <div class="ask-form">
+     <textarea class="ta" id="aq" placeholder="Question in your own words, e.g. self-checkout interview plan: 2 problems + 2 alternatives">${esc(ASK.q)}</textarea>
+     <div class="ask-row"><select id="actx" aria-label="Context">${CONTEXTS.map(([k, n]) => `<option value="${k}" ${ASK.ctx === k ? "selected" : ""}>${n}</option>`).join("")}</select>
+       <select id="atier" aria-label="Depth">${[["quick", "Fast"], ["default", "Balanced"], ["complex", "Deepest (slow)"]].map(([k, n]) => `<option value="${k}" ${ASK.tier === k ? "selected" : ""}>${n}</option>`).join("")}</select></div>
+     <div class="ask-row"><button class="btn primary" id="askGo" ${ASK.busy ? "disabled" : ""}>Find relevant points <span class="mono" style="opacity:.75">Ctrl+↵</span></button>${ASK.busy ? `<button class="btn" id="askStop">Stop</button>` : ""}<span class="note" id="askNote"></span></div>
    </div>
-   <div class="card" style="max-width:none;min-width:0"><div class="answer" id="aout">${ASK.out ? mdToHtml(ASK.out) : `<p class="note">The answer appears here, with clickable slide references.</p>`}</div>
-     ${ASK.sources ? `<details class="src"><summary>What was sent to Claude</summary><div class="vtext">${esc(ASK.sources)}</div></details>` : ""}</div></div>`;
+   <div class="ask-out"><div class="answer" id="aout">${ASK.out ? mdToHtml(ASK.out) : `<p class="note">Answers appear here. Click any reference like <span class="ref" style="cursor:default">6-2 p4</span> to open that slide beside this panel.</p>`}</div>
+     ${ASK.sources ? `<details class="src"><summary>What was sent to Claude</summary><div class="vtext">${esc(ASK.sources)}</div></details>` : ""}
+     ${ASK.hist.length ? `<details class="src" ${ASK.out ? "" : "open"}><summary>Earlier questions (${ASK.hist.length})</summary><div class="hist" style="margin-top:6px">${ASK.hist.slice(0, 12).map((h, i) => `<button class="item" data-hist="${i}"><div class="nm" style="font-weight:600;font-size:14px">${esc(h.q.slice(0, 90))}</div><div class="tag">${esc(CONTEXTS.find(c => c[0] === h.ctx)?.[1] || h.ctx)} · ${new Date(h.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div></button>`).join("")}</div></details>` : ""}</div>`;
   const aq = $("#aq"); aq.addEventListener("input", () => ASK.q = aq.value);
   aq.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runAsk(); } });
+  $("#actx").onchange = e => ASK.ctx = e.target.value;
+  $("#atier").onchange = e => ASK.tier = e.target.value;
   $("#askGo").onclick = runAsk;
+  $("#askClose").onclick = () => toggleAsk(false);
   if ($("#askStop")) $("#askStop").onclick = () => ASK.ctl?.abort();
-  if (!ASK.busy && !ASK.out) aq.focus();
+  if (!sampleFn && sampleChecked) $("#askNote").textContent = "Claude isn't available in this view.";
+  const out = $(".ask-out"); if (out) out.scrollTop = keepScroll;
+  const h = $("#askResize");
+  h.onpointerdown = e => {
+    e.preventDefault(); h.setPointerCapture(e.pointerId); h.classList.add("drag");
+    const move = ev => { const w = Math.max(320, Math.min(window.innerWidth * .7, window.innerWidth - ev.clientX)); document.documentElement.style.setProperty("--askw", w + "px"); };
+    const up = () => { h.classList.remove("drag"); h.removeEventListener("pointermove", move); store.set("askw", getComputedStyle(document.documentElement).getPropertyValue("--askw")); };
+    h.addEventListener("pointermove", move); h.addEventListener("pointerup", up, { once: true });
+  };
 }
 function buildPrompt(q, ctx) {
   const MAX = 200000;
@@ -845,7 +885,7 @@ async function runAsk() {
   if (!sampleFn) { toast("Claude isn't available in this view"); return; }
   const prompt = buildPrompt(q, ASK.ctx);
   ASK.sources = prompt; ASK.out = ""; ASK.busy = true; ASK.ctl = new AbortController();
-  renderAsk(); $("#aout").innerHTML = `<div class="thinking"><span class="dot"></span>Thinking… the deeper settings can take up to a minute.</div>`;
+  renderAsk(); $(".ask-out").scrollTop = 0; $("#aout").innerHTML = `<div class="thinking"><span class="dot"></span>Thinking… the deeper settings can take up to a minute.</div>`;
   try {
     const r = await sampleFn(prompt, { signal: ASK.ctl.signal, modelTier: ASK.tier, onText: ({ text }) => { ASK.out = text; const o = $("#aout"); if (o) o.innerHTML = mdToHtml(text); } });
     ASK.out = r.text; if (r.truncated) ASK.out += "\n\n*(Cut short — ask about one part at a time.)*";
@@ -944,7 +984,7 @@ document.addEventListener("click", e => {
   const t = e.target.closest("button,[data-ref]"); if (!t) return;
   const ds = t.dataset;
   if (ds.view) return setView(ds.view);
-  if (ds.ref) { e.preventDefault(); return openDetail({ type: "page", ref: ds.ref }); }
+  if (ds.ref) { e.preventDefault(); if (window.innerWidth <= 900 && t.closest("#askbar")) toggleAsk(false); return openDetail({ type: "page", ref: ds.ref }); }
   if (ds.open) {
     if (ds.open === "concept") return openDetail({ type: "concept", id: ds.key });
     if (ds.open === "page") return openDetail({ type: "page", ref: ds.key });
@@ -961,9 +1001,8 @@ document.addEventListener("click", e => {
   if (ds.rm) { B.ids = B.ids.filter(x => x !== ds.rm); (B.removed ||= []).push(ds.rm); store.set("build", B); return renderBuild(); }
   if (t.id === "bclear") { Object.assign(B, { q: "", ids: [], ticks: {}, removed: [], ctxManual: false }); store.set("build", B); return renderBuild(); }
   if (t.id === "bcopy") return copy(outline());
-  if (t.id === "toAsk") { ASK.q = B.q + (B.ids.length ? "\nConcepts: " + B.ids.map(i => CBYID[i]?.name).join(", ") : ""); ASK.ctx = CONTEXTS.some(c => c[0] === B.ctx) ? B.ctx : "general"; ASK.out = ""; return setView("ask"); }
-  if (ds.actx) { ASK.ctx = ds.actx; return renderAsk(); }
-  if (ds.tier) { ASK.tier = ds.tier; return renderAsk(); }
+  if (t.id === "toAsk") { ASK.q = B.q + (B.ids.length ? "\nConcepts: " + B.ids.map(i => CBYID[i]?.name).join(", ") : ""); ASK.ctx = CONTEXTS.some(c => c[0] === B.ctx) ? B.ctx : "general"; ASK.out = ""; ASK.sources = ""; toggleAsk(true); return; }
+  if (t.id === "askToggle") return toggleAsk();
   if (ds.hist) { const h = ASK.hist[+ds.hist]; Object.assign(ASK, { q: h.q, ctx: h.ctx, out: h.out, sources: "" }); return renderAsk(); }
   if (ds.deldoc) { IDB.del(ds.deldoc); delete DOCS[ds.deldoc]; pdfCache.delete(ds.deldoc); buildIndex(); return renderLibrary(); }
   if (t.id === "clockBtn") { e.stopPropagation(); return toggleTimer(); }
@@ -977,6 +1016,7 @@ document.addEventListener("input", e => { if (e.target.dataset.notes) { store.se
 function buildNotesIntoIndex() { /* notes are matched through the concept cards; nothing to index separately */ }
 document.addEventListener("keydown", e => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
+  if (e.altKey && e.key === "3" && MODE === "personal") { e.preventDefault(); toggleAsk(); return; }
   if (e.altKey && /^[1-9]$/.test(e.key)) { const v = VIEWS[+e.key - 1]; if (v) { e.preventDefault(); setView(v[0]); } return; }
   if (e.key === "/" && !typing) { e.preventDefault(); if (S.view !== "lookup") { S.view = "lookup"; render(); } const q = $("#q"); q.focus(); q.select(); return; }
   if ((e.altKey && e.key === "ArrowLeft") || (e.key === "Backspace" && !typing)) { e.preventDefault(); goBack(); return; }
@@ -1000,11 +1040,15 @@ async function boot() {
   if (MODE === "public") { for (const d of await IDB.all()) DOCS[d.id] = d; }
   buildIndex();
   const h = (location.hash || "").slice(1); if (VIEWS.some(v => v[0] === h)) S.view = h;
+  if (h === "ask") ASK.open = true;
+  try { const w = store.get("askw", ""); if (w) document.documentElement.style.setProperty("--askw", w); } catch {}
   render(); tick(); setInterval(tick, 1000);
+  if (MODE === "personal" && ASK.open) { $("#askbar").hidden = false; renderAsk(); }
   if (S.view === "lookup") $("#q")?.focus();
   if (MODE === "personal" && window.claude?.use) {
     try { sampleFn = await window.claude.use("sample"); } catch { sampleFn = null; }
-    if (!sampleFn && S.view === "ask") { const n = $("#askNote"); if (n) n.textContent = "Claude isn't available in this view."; }
+    sampleChecked = true;
+    if (!sampleFn) { const n = $("#askNote"); if (n) n.textContent = "Claude isn't available in this view."; }
   }
 }
 boot();
